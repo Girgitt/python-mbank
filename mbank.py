@@ -1,28 +1,31 @@
 # -*- coding:utf8 -*-
-# Pobieranie aktualnej (z ostatniego miesiaca) historii transakcji.
-#
-# Wymagane biblioteki: mechanize, clientform
-#
-# Sposob uzycia:
-#
-# mbank = Mbank('identyfikator', 'haslo', '71 1140 2004 0000 3902 6269 9864')
-# print mbank.get_history()
-
 import re
 import datetime
 from mechanize import Browser
-
-DEBUG = True
+from pyquery import PyQuery as pq
 
 # regex do wyciagania danych z history CSV
 reg = re.compile('(?P<operation_date>^\d+\-\d+\-\d+);' \
                  '(?P<book_date>\d+\-\d+\-\d+);' \
                  '(?P<type>[^;]+);' \
-                 '"(?P<title>[^;]+)";' \
+                 '"(?P<title>[^;]*)";' \
                  '"(?P<who>[^;]+)";' \
-                 '\'(?P<account>[^;]+)\';' \
+                 '\'(?P<account>[^;]*)\';' \
                  '(?P<amount>[-\ 0-9,]+);' \
                  '(?P<account_balance>[-\ 0-9,]+);') 
+
+
+def clean_amount(amount):
+    return float(amount.replace(' ', '').replace(',', '.').replace('PLN',''))
+
+
+def fixcoding(text):
+    return text.decode('windows-1250').encode('utf8').decode('utf8')
+
+
+def cvtdate(text, fmt='%Y-%m-%d'):
+    return datetime.datetime.strptime(text, fmt).date()
+
 
 class Mbank(object):
     """
@@ -30,10 +33,9 @@ class Mbank(object):
     formularz i wykonywania pozadanych akcji na stronach panelu klienta
     mbanku.
     """
-    def __init__(self, id, password, bank_number=None):
+    def __init__(self, id, password):
         self.id = id
         self.password = password
-        self.bank_number = bank_number.replace(' ', '')
         self.url = 'https://www.mbank.com.pl'
         self.form_name = 'MainForm'
 
@@ -46,12 +48,6 @@ class Mbank(object):
              '(lucid) Firefox/3.6.6'),
             ('Accept-Encoding', 'gzip,deflate')
         ]
-
-        # debugi
-        if DEBUG:
-            self.br.set_debug_redirects(True)
-            self.br.set_debug_responses(True)
-            self.br.set_debug_http(True)
 
     def login(self):
         """
@@ -67,33 +63,31 @@ class Mbank(object):
         self.br.form.set_value(name='localDT', value=formated_now)
         return self.br.submit()
 
-    def select_account(self, bank_number):
-        """
-        Wybiera konto bankowe na podstawie @bank_number i wysyla POST
-        z odpowiednimi parametrami dla danego konta.
-        """
-        self.br.open('https://www.mbank.com.pl/accounts_list.aspx')
-
+    def select(self, path, number):
+        number = number.replace(' ','')
+        self.br.open('%s/%s' % (self.url, path))
         for l in self.br.links():
-            if l.text.replace(' ', '').find(bank_number) > -1:
+            if l.text.replace(' ', '').find(number) > -1:
                 break
 
         # Znajdz atrybut onclick dla taga <a> z numerem konta bankowego.
+        onclick = None
         for a in l.attrs:
             if a[0] == 'onclick':
-                onclick = a[1].split("'")
+                onclick = a[1]
                 break
+        if not onclick:
+            raise Exception('No onclick found')
+        return self.onclick(onclick)
 
-        # Wszystkie ponizsze dane pobierane sa z atrybutu onclick,
-        # w ktorym to uruchamiana jest funkcja JS doSubmit().
-
+    def onclick(self, onclick):
+        onclick = onclick.split("'")
         # Adres gdzie bedziemy slac dane.
         addr = onclick[1]
         # Metoda wysylania (POST)
         method = onclick[5]
         # Parametry
         params = onclick[7]
-
 
         self.br.select_form(name=self.form_name)
         self.br.form.action = '%s%s' % (self.url, addr)
@@ -104,16 +98,68 @@ class Mbank(object):
         self.br.form.set_value(name='__PARAMETERS', value=params)
         return self.br.submit()
 
-    def history_form(self):
+    def get_credit_card_history(self, credit_card_number, start=None, end=None):
+        self.select('cards_list.aspx', credit_card_number)
+
+        self.br.select_form(name=self.form_name)
+        self.br.form.action = '%s%s' % (self.url, '/cc_historical_statements_list.aspx')
+        self.br.form.method = 'POST'
+        response = self.br.submit()
+        doc = pq(response.read())
+        history_start = [cvtdate(a.text) for a in doc('#historicalStatementsList p.Date span')]
+        history_end = [cvtdate(a.text) for a in doc('#historicalStatementsList p.Date a')]
+        history_onclick = [pq(a).attr.onclick for a in doc('#historicalStatementsList p.Date a')]
+        history = zip(*[history_start, history_end, history_onclick])
+
+        history_to_check = []
+        for h in history:
+            if h[0] <= start <= h[1]:
+                history_to_check.append(h[2])
+            elif h[0] <= end <= h[1]:
+                history_to_check.append(h[2])
+            elif start <= h[0] <= end:
+                history_to_check.append(h[2])
+            elif start <= h[1] <= end:
+                history_to_check.append(h[2])
+
+        for h in history_to_check:
+            response = self.onclick(h)
+            doc = pq(response.read())
+            amount = [a.text for a in doc('#cc_current_operations p.Amount:eq(1) span')]
+            title = [a.text for a in doc('#cc_current_operations p.Merchant span')]
+            _type = [a.text for a in doc('#cc_current_operations p.OperationType a')]
+            book_date = [a.text for a in doc('#cc_current_operations p.Date span:eq(1)')]
+            operation_date = [a.text for a in doc('#cc_current_operations p.Date span:eq(0)')]
+
+            row = zip(*[amount, title, _type, book_date, operation_date])
+            for r in row:
+                if not r[1]:
+                    continue
+                yield {
+                    'operation_date': cvtdate(r[4], '%d-%m-%Y'),
+                    'book_date': cvtdate(r[3], '%d-%m-%Y'),
+                    'type': ' '.join(r[2].split()),
+                    'who': '',
+                    'account': '',
+                    'title': ' '.join(r[1].split()),
+                    'amount': clean_amount(r[0]),
+                    'account_balance': 0
+                }
+
+    def get_history(self, bank_number, start=None, end=None):
         """
-        Przejscie na formularz historii transakcji.
+        Glowna metoda uruchamiajaca w sobie przejscie na formularz
+        historii transakcji (po zalogowaniu) i pobranie danych.
         """
+        self.select('accounts_list.aspx', bank_number)
         self.br.select_form(name=self.form_name)
         self.br.form.action = '%s%s' % (self.url, '/account_oper_list.aspx')
         self.br.form.method = 'POST'
-        return self.br.submit()
+        self.br.submit()
+        data = self._get_history(start, end)
+        return self.parse_history_csv(data)
 
-    def _get_history(self, type, last_day=False):
+    def _get_history(self, start, end):
         """
         Metoda ustawiajaca odpowiednie parametry na formularzu historii
         transakcji i wysylajaca go.
@@ -122,51 +168,39 @@ class Mbank(object):
         # exportuj dane
         self.br.form.find_control("export_oper_history_check").items[0].selected = True
         # ustawienie selecta z typem danych (domyslnie HTML)
-        self.br.form.set_value(name='export_oper_history_format', value=[type])
+        self.br.form.set_value(name='export_oper_history_format', value=['CSV'])
         self.br.form.action = '%s%s' % (self.url, '/printout_oper_list.aspx')
         self.br.form.method = 'POST'
-        if last_day:
-            self.br.form.set_value(['lastdays_radio'], name='rangepanel_group')
-            self.br.form.find_control('lastdays_period').items[0].selected = True
+
+        self.br.form.set_value(['daterange_radio'], name='rangepanel_group')
+        self.br.form.set_value(start.strftime('%d'), name='daterange_from_day')
+        self.br.form.set_value(start.strftime('%m'), name='daterange_from_month')
+        self.br.form.set_value(start.strftime('%Y'), name='daterange_from_year')
+
+        self.br.form.set_value(end.strftime('%d'), name='daterange_to_day')
+        self.br.form.set_value(end.strftime('%m'), name='daterange_to_month')
+        self.br.form.set_value(end.strftime('%Y'), name='daterange_to_year')
 
         response = self.br.submit()
         return response.read()
-
-    def get_history(self, type='HTML', last_day=False):
-        """
-        Glowna metoda uruchamiajaca w sobie przejscie na formularz
-        historii transakcji (po zalogowaniu) i pobranie danych.
-        """
-        self.login()
-        self.select_account(self.bank_number)
-        self.history_form()
-        return self._get_history(type, last_day)
 
     def parse_history_csv(self, data):
         """
         Przetworzenie danych historii transakcji w postaci CSV do
         dict().
         """
-        def clean_amount(amount):
-            return float(amount.replace(' ', '').replace(',', '.'))
-
-        def fixcoding(text):
-            return text.decode('windows-1250').encode('utf8').decode('utf8')
-
-        rows = []
         for row in data.split('\n'):
             f = reg.search(row)
             if not f:
                 continue
             parsed_row = reg.search(row).groupdict()
-            rows.append({
-                'operation_date': parsed_row['operation_date'],
-                'book_date': parsed_row['book_date'],
-                'type': fixcoding(parsed_row['type']),
-                'who': fixcoding(parsed_row['who']),
+            yield {
+                'operation_date': cvtdate(parsed_row['operation_date']),
+                'book_date': cvtdate(parsed_row['book_date']),
+                'type': ' '.join(fixcoding(parsed_row['type']).split()),
+                'who': ' '.join(fixcoding(parsed_row['who']).split()),
                 'account': fixcoding(parsed_row['account']),
-                'title': fixcoding(parsed_row['title'].strip()),
+                'title': ' '.join(fixcoding(parsed_row['title']).split()),
                 'amount': clean_amount(parsed_row['amount']),
                 'account_balance': clean_amount(parsed_row['account_balance'])
-            })
-        return rows
+            }
