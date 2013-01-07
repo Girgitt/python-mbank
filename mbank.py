@@ -98,7 +98,7 @@ class Mbank(object):
         self.br.form.set_value(name='__PARAMETERS', value=params)
         return self.br.submit()
 
-    def get_credit_card_history(self, credit_card_number, start=None, end=None):
+    def get_credit_card_history(self, credit_card_number, start=None, end=None, full_credit_history=False):
         self.select('cards_list.aspx', credit_card_number)
 
         self.br.select_form(name=self.form_name)
@@ -112,15 +112,20 @@ class Mbank(object):
         history = zip(*[history_start, history_end, history_onclick])
 
         history_to_check = []
-        for h in history:
-            if h[0] <= start <= h[1]:
-                history_to_check.append(h[2])
-            elif h[0] <= end <= h[1]:
-                history_to_check.append(h[2])
-            elif start <= h[0] <= end:
-                history_to_check.append(h[2])
-            elif start <= h[1] <= end:
-                history_to_check.append(h[2])
+        if full_credit_history:
+            for h in history:
+                if h[1] == end:
+                    history_to_check.append(h[2])
+        else:
+            for h in history:
+                if h[0] <= start <= h[1]:
+                    history_to_check.append(h[2])
+                elif h[0] <= end <= h[1]:
+                    history_to_check.append(h[2])
+                elif start <= h[0] <= end:
+                    history_to_check.append(h[2])
+                elif start <= h[1] <= end:
+                    history_to_check.append(h[2])
 
         for h in history_to_check:
             response = self.onclick(h)
