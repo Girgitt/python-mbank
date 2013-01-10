@@ -138,7 +138,10 @@ class Mbank(object):
 
             row = zip(*[amount, title, _type, book_date, operation_date])
             for r in row:
-                if not r[1]:
+		title = r[1]
+                if r[2] == u'OP\u0141ATA ZA KART\u0118':
+                    title = 'mBank'
+                if not title:
                     continue
                 yield {
                     'operation_date': cvtdate(r[4], '%d-%m-%Y'),
@@ -146,7 +149,7 @@ class Mbank(object):
                     'type': ' '.join(r[2].split()),
                     'who': '',
                     'account': '',
-                    'title': ' '.join(r[1].split()),
+                    'title': ' '.join(title.split()),
                     'amount': clean_amount(r[0]),
                     'account_balance': 0
                 }
