@@ -20,5 +20,5 @@ class BuxferConnection(object):
             t['amount'] = t['amount'][1:]
         else:
             t['amount'] = '+%s' % t['amount']
-        params['text'] = '%s %s acct:%s date:%s tags:%s' % (t['title'], t['amount'], t['accounts'], t['date'], t['tags'])
+        params['text'] = '%s %s acct:%s date:%s tags:%s status:pending' % (t['title'], t['amount'], t['accounts'], t['date'], t['tags'])
         return requests.post(self.url + 'add_transaction.json', params=params)
